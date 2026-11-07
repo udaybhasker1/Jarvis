@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aura Jarvis</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#08121c;--panel:#0f2030;--line:#24425a;--ink:#e6eef4;--mute:#8aa3b5;--accent:#8fd8ff;
+--font:"Rajdhani","Segoe UI",system-ui,sans-serif}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:radial-gradient(ellipse at 50% 30%,#10283d 0,var(--bg) 62%);color:var(--ink);font:16px/1.5 system-ui,sans-serif;
+display:flex;flex-direction:column;align-items:center;padding:24px 16px;gap:20px}
+body[data-emotion=happy]{--accent:#ffb347}
+body[data-emotion=sad]{--accent:#7f9bff}
+body[data-emotion=angry]{--accent:#ff6b5e}
+h1{font:700 28px var(--font);letter-spacing:.04em;margin:0}
+#status{font:500 18px var(--font);color:var(--accent);min-height:1.4em;transition:color .6s}
+.orb{position:relative;width:min(56vw,260px);aspect-ratio:1;border:0;background:none;cursor:pointer;border-radius:50%}
+.orb:focus-visible{outline:2px solid var(--accent);outline-offset:8px}
+.orb i{position:absolute;inset:0;border-radius:50%;border:2px solid var(--accent);transition:border-color .6s,transform .3s}
+.orb i:nth-child(1){inset:0;border-style:dashed;opacity:.55;animation:spin 24s linear infinite}
+.orb i:nth-child(2){inset:12%;opacity:.8}
+.orb i:nth-child(3){inset:26%;border-width:3px;box-shadow:0 0 28px var(--accent),inset 0 0 22px var(--accent);animation:pulse 3.2s ease-in-out infinite}
+.orb b{position:absolute;inset:42%;border-radius:50%;background:var(--accent);box-shadow:0 0 34px var(--accent);transition:background .6s}
+body[data-state=listening] .orb i:nth-child(3){animation-duration:.9s}
+body[data-state=thinking] .orb i:nth-child(1){animation-duration:2.5s}
+body[data-state=speaking] .orb i:nth-child(2){animation:pulse .6s ease-in-out infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes pulse{50%{transform:scale(1.07)}}
+@media(prefers-reduced-motion:reduce){.orb i,.orb b{animation:none!important}}
+.row{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
+.row button,form button{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:8px 14px;font:inherit;cursor:pointer}
+.row button:hover,form button:hover{border-color:var(--accent)}
+.row button[aria-pressed=true]{border-color:var(--accent);color:var(--accent)}
+#log{width:min(640px,100%);flex:1;min-height:120px;overflow-y:auto;display:flex;flex-direction:column;gap:10px;padding:4px}
+.m{max-width:85%;padding:9px 13px;border-radius:8px;background:var(--panel);border:1px solid var(--line)}
+.m.you{align-self:flex-end;color:var(--mute)}
+.m.ai{border-color:var(--accent)}
+.m a{color:var(--accent)}
+form{display:flex;gap:8px;width:min(640px,100%)}
+form input{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:6px;color:var(--ink);padding:9px 12px;font:inherit}
+form input:focus{outline:2px solid var(--accent)}
+</style>
+</head>
+<body data-state="idle" data-emotion="neutral">
+<h1>Aura Jarvis</h1>
+<div id="status" role="status" aria-live="polite">Click the orb or press Space to talk</div>
+<button class="orb" id="orb" aria-label="Talk to Jarvis"><i></i><i></i><i></i><b></b></button>
+<div class="row">
+  <button id="wake" aria-pressed="false">Wake word: off</button>
+  <button data-q="What time is it">Time</button>
+  <button data-q="Weather in Hyderabad">Weather</button>
+  <button data-q="Open youtube">Open YouTube</button>
+  <button data-q="Set a timer for 1 minute">1-minute timer</button>
+</div>
+<div id="log" aria-live="polite"></div>
+<form id="f"><input id="t" placeholder="Or type a command" autocomplete="off"><button>Send</button></form>
+
+<script>
+const $=id=>document.getElementById(id), B=document.body;
+const setState=s=>{B.dataset.state=s}, say=t=>{$('status').textContent=t};
+let busy=false, wakeOn=false, rec=null;
+
+function log(text,cls,link){
+  const d=document.createElement('div'); d.className='m '+cls; d.textContent=text;
+  if(link){d.append(' ');const a=document.createElement('a');a.href=link;a.target='_blank';a.rel='noopener';a.textContent='Open link';d.append(a)}
+  $('log').append(d); $('log').scrollTop=1e9;
+}
+
+/* ---- audio: record with silence detection, convert to 16 kHz WAV for Gnani ---- */
+async function toWav(blob){
+  const ctx=new (window.AudioContext||window.webkitAudioContext)();
+  const dec=await ctx.decodeAudioData(await blob.arrayBuffer()); ctx.close();
+  const rate=16000, off=new OfflineAudioContext(1,Math.ceil(dec.duration*rate),rate);
+  const src=off.createBufferSource(); src.buffer=dec; src.connect(off.destination); src.start();
+  const pcm=(await off.startRendering()).getChannelData(0), n=pcm.length;
+  const v=new DataView(new ArrayBuffer(44+n*2)), w=(o,s)=>[...s].forEach((c,i)=>v.setUint8(o+i,c.charCodeAt(0)));
+  w(0,'RIFF');v.setUint32(4,36+n*2,true);w(8,'WAVEfmt ');v.setUint32(16,16,true);v.setUint16(20,1,true);
+  v.setUint16(22,1,true);v.setUint32(24,rate,true);v.setUint32(28,rate*2,true);v.setUint16(32,2,true);v.setUint16(34,16,true);
+  w(36,'data');v.setUint32(40,n*2,true);
+  for(let i=0;i<n;i++)v.setInt16(44+i*2,Math.max(-1,Math.min(1,pcm[i]))*0x7fff,true);
+  return new Blob([v],{type:'audio/wav'});
+}
+
+function record(){
+  return new Promise(async(resolve,reject)=>{
+    let stream; try{stream=await navigator.mediaDevices.getUserMedia({audio:true})}catch(e){return reject(new Error('Microphone access is blocked.'))}
+    const mr=new MediaRecorder(stream), chunks=[]; mr.ondataavailable=e=>chunks.push(e.data);
+    const ac=new AudioContext(), an=ac.createAnalyser(); an.fftSize=1024; ac.createMediaStreamSource(stream).connect(an);
+    const buf=new Float32Array(an.fftSize), t0=performance.now(); let last=t0, heard=false;
+    const timer=setInterval(()=>{
+      an.getFloatTimeDomainData(buf); const rms=Math.sqrt(buf.reduce((s,x)=>s+x*x,0)/buf.length), now=performance.now();
+      if(rms>0.02){heard=true;last=now}
+      if((heard&&now-last>1200)||now-t0>15000||(!heard&&now-t0>6000))mr.stop();
+    },100);
+    mr.onstop=()=>{clearInterval(timer);stream.getTracks().forEach(t=>t.stop());ac.close();
+      heard?resolve(new Blob(chunks)):reject(new Error("I didn't hear anything."))};
+    mr.start();
+  });
+}
+
+/* ---- talk to the server ---- */
+async function respond(data){
+  if(data.error){say(data.error);log(data.error,'ai');return}
+  document.body.dataset.emotion=data.emotion||'neutral';
+  if(data.transcript)log(data.transcript,'you');
+  log(data.reply,'ai',data.action&&data.action.type==='open_url'?data.action.url:null);
+  if(data.action)runAction(data.action);
+  setState('speaking'); say('Speaking');
+  await speak(data);
+}
+function speak(d){
+  return new Promise(res=>{
+    const done=()=>{setState('idle');say('Ready');res()};
+    if(d.audio){const a=new Audio('data:audio/wav;base64,'+d.audio);a.onended=done;a.onerror=done;a.play().catch(done)}
+    else{const u=new SpeechSynthesisUtterance(d.reply);u.onend=done;u.onerror=done;speechSynthesis.speak(u)}
+  });
+}
+function runAction(a){
+  if(a.type==='open_url')window.open(a.url,'_blank','noopener');
+  if(a.type==='timer')setTimeout(()=>respond({reply:"Your timer is up.",emotion:'neutral'}),a.seconds*1000);
+}
+
+async function talk(){
+  if(busy)return; busy=true; wakeStop();
+  try{
+    setState('listening'); say('Listening');
+    const wav=await toWav(await record());
+    setState('thinking'); say('Thinking');
+    const fd=new FormData(); fd.append('audio',wav,'speech.wav');
+    await respond(await (await fetch('/api/jarvis/voice',{method:'POST',body:fd})).json());
+  }catch(e){setState('idle');say(e.message);}
+  busy=false; if(wakeOn)wakeStart();
+}
+async function sendText(t){
+  if(busy||!t)return; busy=true; setState('thinking'); say('Thinking');
+  try{await respond(await (await fetch('/api/jarvis/text',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:t})})).json())}
+  catch(e){setState('idle');say('Server unreachable.')}
+  busy=false;
+}
+
+/* ---- wake word: browser recognition only listens for "Jarvis"; Gnani does the real transcription ---- */
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+function wakeStart(){
+  if(!SR||rec)return; rec=new SR(); rec.continuous=true; rec.interimResults=true; rec.lang='en-IN';
+  rec.onresult=e=>{const t=[...e.results].map(r=>r[0].transcript).join(' ').toLowerCase();if(/jarvis|jarvish|service/.test(t)){wakeStop();talk()}};
+  rec.onend=()=>{rec=null;if(wakeOn&&!busy)wakeStart()}; try{rec.start()}catch(e){rec=null}
+}
+function wakeStop(){if(rec){const r=rec;rec=null;r.onend=null;try{r.stop()}catch(e){}}}
+$('wake').onclick=e=>{
+  if(!SR){say('Wake word needs Chrome or Edge.');return}
+  wakeOn=!wakeOn; e.target.setAttribute('aria-pressed',wakeOn); e.target.textContent='Wake word: '+(wakeOn?'on, say "Jarvis"':'off');
+  wakeOn?wakeStart():wakeStop(); if(wakeOn)say('Say "Jarvis"');
+};
+
+$('orb').onclick=talk;
+document.addEventListener('keydown',e=>{if(e.code==='Space'&&e.target.tagName!=='INPUT'){e.preventDefault();talk()}});
+document.querySelectorAll('[data-q]').forEach(b=>b.onclick=()=>sendText(b.dataset.q));
+$('f').onsubmit=e=>{e.preventDefault();const v=$('t').value.trim();$('t').value='';sendText(v)};
+log("Online. Ask me the time, the weather, to open a site, or to set a timer.",'ai');
+</script>
+</body>
+</html>
